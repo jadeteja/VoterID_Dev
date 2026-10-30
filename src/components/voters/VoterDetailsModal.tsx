@@ -11,8 +11,8 @@ export const VoterDetailsModal: React.FC<VoterDetailsModalProps> = ({ voter, onC
   if (!voter) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center responsive-modal-container bg-black/60 backdrop-blur-sm">
+      <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col mx-auto animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
         <div className="bg-[#123D73] text-white px-6 py-4 flex items-center justify-between">
           <div className="flex items-center space-x-3">

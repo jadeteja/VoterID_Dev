@@ -20,7 +20,7 @@ export const DashboardPage: React.FC = () => {
   const ocrCount = isEmpty ? 0 : (currentDataset.filter((v) => Boolean(v.ocr_review)).length || 2429);
 
   return (
-    <div className="p-4 md:p-6 lg:p-8 max-w-7xl mx-auto w-full space-y-6">
+    <div className="site-content-wrapper py-4 md:py-6 lg:py-8 max-w-7xl mx-auto w-full space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>

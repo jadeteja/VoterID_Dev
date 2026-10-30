@@ -217,7 +217,9 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col min-w-0 overflow-y-auto max-h-screen">
-        {children}
+        <div className="w-full flex-1 flex flex-col items-center">
+          {children}
+        </div>
       </main>
     </div>
   );

@@ -36,7 +36,7 @@ export const UserManagementPage: React.FC = () => {
   };
 
   return (
-    <div className="p-4 md:p-6 lg:p-8 max-w-5xl mx-auto w-full space-y-6">
+    <div className="site-content-wrapper py-4 md:py-6 lg:py-8 max-w-5xl mx-auto w-full space-y-6">
       <div>
         <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">
           User Access Management / వినియోగదారుల నిర్వహణ

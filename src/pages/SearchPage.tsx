@@ -63,7 +63,7 @@ export const SearchPage: React.FC = () => {
   };
 
   return (
-    <div className="p-4 md:p-6 lg:p-8 max-w-7xl mx-auto w-full">
+    <div className="site-content-wrapper py-4 md:py-6 lg:py-8 max-w-7xl mx-auto w-full">
       {/* Title Header */}
       <div className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>

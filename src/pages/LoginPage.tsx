@@ -34,8 +34,8 @@ export const LoginPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-[#F5F8FC]">
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200/80 p-8 space-y-6">
+    <div className="min-h-screen flex items-center justify-center site-content-wrapper py-6 bg-[#F5F8FC]">
+      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200/80 p-6 sm:p-8 space-y-6 mx-auto">
         {/* App Logo & Header */}
         <div className="text-center space-y-2">
           <div className="inline-flex p-3 bg-blue-600 text-white rounded-2xl shadow-lg shadow-blue-500/30">
