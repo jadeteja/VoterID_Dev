@@ -10,27 +10,226 @@ import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 // Local storage key for persistent parsed voter data in offline / client demo mode
 const LOCAL_STORAGE_KEY = 'ward81_active_voters_dataset';
+const LOCAL_STORAGE_META_KEY = 'ward81_dataset_metadata';
+
+export interface DatasetMetadata {
+  sourceWorkbook?: string;
+  lastUpdated?: string;
+  status: 'active' | 'empty';
+}
+
+let memoryDataset: VoterRecord[] | null = null;
+let loadPromise: Promise<VoterRecord[]> | null = null;
+
+export async function loadVoterDataset(): Promise<VoterRecord[]> {
+  if (memoryDataset && memoryDataset.length > 6) {
+    return memoryDataset;
+  }
+  if (loadPromise) {
+    return loadPromise;
+  }
+
+  loadPromise = (async () => {
+    // 1. First attempt to load bundled static master dataset
+    try {
+      let response = await fetch('/data/ward81_voters.json');
+      if (!response.ok) {
+        response = await fetch('/data/voters.json');
+      }
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data) && data.length > 0) {
+          memoryDataset = data;
+          return data;
+        }
+      }
+    } catch (e) {
+      console.warn('Could not load static voter dataset', e);
+    }
+
+    // 2. Try localStorage
+    try {
+      const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (raw !== null) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          memoryDataset = parsed;
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('Could not read dataset from localStorage', e);
+    }
+
+    // 3. Fallback to initial mock voters
+    memoryDataset = INITIAL_MOCK_VOTERS;
+    return INITIAL_MOCK_VOTERS;
+  })();
+
+  return loadPromise;
+}
+
+export function getDatasetMetadata(): DatasetMetadata {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_META_KEY);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+  } catch (e) {
+    console.warn('Could not read dataset metadata from localStorage', e);
+  }
+  return {
+    sourceWorkbook: 'Ward81 Voter List New.xlsx',
+    status: 'active',
+  };
+}
 
 export function getActiveDataset(): VoterRecord[] {
+  if (memoryDataset && memoryDataset.length > 0) {
+    return memoryDataset;
+  }
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (raw) {
+    if (raw !== null) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed) && parsed.length > 6) {
+        memoryDataset = parsed;
         return parsed;
       }
     }
   } catch (e) {
     console.warn('Could not read dataset from localStorage', e);
   }
+  loadVoterDataset().catch(() => {});
   return INITIAL_MOCK_VOTERS;
 }
 
-export function saveActiveDataset(records: VoterRecord[]): void {
+export function saveActiveDataset(records: VoterRecord[], sourceWorkbook?: string): void {
+  memoryDataset = records;
+  loadPromise = Promise.resolve(records);
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
   } catch (e) {
-    console.error('Failed to store dataset in localStorage', e);
+    console.warn('Could not persist full dataset to localStorage (memory cache active):', e);
+  }
+  try {
+    const meta: DatasetMetadata = {
+      sourceWorkbook: sourceWorkbook || (records.length === 0 ? 'None' : 'Ward81 Voter List New.xlsx'),
+      lastUpdated: new Date().toISOString(),
+      status: records.length > 0 ? 'active' : 'empty',
+    };
+    localStorage.setItem(LOCAL_STORAGE_META_KEY, JSON.stringify(meta));
+  } catch (e) {
+    console.error('Failed to store dataset metadata in localStorage', e);
+  }
+}
+
+export async function uploadDatasetToSupabase(
+  filename: string,
+  fileSize: number,
+  records: Omit<VoterRecord, 'id' | 'import_batch_id' | 'is_active' | 'created_at' | 'updated_at'>[],
+  onProgress?: (inserted: number, total: number) => void
+): Promise<{ batchId: string; total: number }> {
+  if (!isSupabaseConfigured) {
+    throw new Error('Supabase is not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your environment.');
+  }
+
+  const batchId = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+
+  // 1. Create Import Batch
+  const { error: batchErr } = await supabase.from('import_batches').insert({
+    id: batchId,
+    original_filename: filename,
+    file_size: fileSize,
+    import_status: 'active',
+    expected_rows: records.length,
+    imported_rows: 0,
+    started_at: timestamp,
+  });
+
+  if (batchErr) {
+    throw new Error(`Failed to create import batch: ${batchErr.message}`);
+  }
+
+  // 2. Insert records in chunks of 500
+  const CHUNK_SIZE = 500;
+  let inserted = 0;
+
+  for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+    const chunk = records.slice(i, i + CHUNK_SIZE).map((r, idx) => ({
+      import_batch_id: batchId,
+      serial_number: r.serial_number || (i + idx + 1),
+      voter_name: r.voter_name,
+      voter_name_search: r.voter_name_search,
+      voter_name_romanized: r.voter_name_romanized,
+      relation: r.relation,
+      relative_name: r.relative_name,
+      relative_name_search: r.relative_name_search,
+      relative_name_romanized: r.relative_name_romanized,
+      age: r.age,
+      gender: r.gender,
+      door_number: r.door_number,
+      epic_number: r.epic_number,
+      polling_station: r.polling_station,
+      ac_part_sl_number: r.ac_part_sl_number,
+      pdf_page: r.pdf_page,
+      ocr_review: r.ocr_review,
+      polling_station_description: r.polling_station_description,
+      source_sheet: r.source_sheet,
+      source_row: r.source_row,
+      is_active: true,
+      created_at: timestamp,
+      updated_at: timestamp,
+    }));
+
+    const { error: insertErr } = await supabase.from('voters').insert(chunk);
+    if (insertErr) {
+      console.error(`Chunk insert error (${i}-${i + chunk.length}):`, insertErr);
+      throw new Error(`Failed to insert voters chunk: ${insertErr.message}`);
+    }
+
+    inserted += chunk.length;
+    onProgress?.(inserted, records.length);
+  }
+
+  // 3. Mark batch completed
+  await supabase
+    .from('import_batches')
+    .update({
+      imported_rows: inserted,
+      completed_at: new Date().toISOString(),
+      import_status: 'active',
+    })
+    .eq('id', batchId);
+
+  return { batchId, total: inserted };
+}
+
+export async function fetchImportBatches(): Promise<{ id: string; original_filename: string; imported_rows: number; started_at: string }[]> {
+  if (!isSupabaseConfigured) return [];
+  const { data, error } = await supabase
+    .from('import_batches')
+    .select('id, original_filename, imported_rows, started_at')
+    .order('started_at', { ascending: false });
+
+  if (error || !data) return [];
+  return data;
+}
+
+export function clearActiveDataset(): void {
+  memoryDataset = [];
+  loadPromise = Promise.resolve([]);
+  try {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify([]));
+    const meta: DatasetMetadata = {
+      sourceWorkbook: 'None',
+      lastUpdated: new Date().toISOString(),
+      status: 'empty',
+    };
+    localStorage.setItem(LOCAL_STORAGE_META_KEY, JSON.stringify(meta));
+  } catch (e) {
+    console.error('Failed to clear dataset from localStorage', e);
   }
 }
 
@@ -64,6 +263,9 @@ export async function searchVoters(
         }
       }
 
+      if (filters.batchId) {
+        queryBuilder = queryBuilder.eq('import_batch_id', filters.batchId);
+      }
       if (filters.epicNumber) {
         queryBuilder = queryBuilder.ilike('epic_number', `%${filters.epicNumber}%`);
       }
@@ -102,7 +304,7 @@ export async function searchVoters(
   }
 
   // Client-side high-performance indexed search engine
-  const dataset = getActiveDataset();
+  const dataset = await loadVoterDataset();
   let results = [...dataset];
 
   const rawQuery = filters.query?.trim();
@@ -183,6 +385,9 @@ export async function searchVoters(
   }
 
   // Apply column-specific filters
+  if (filters.batchId) {
+    results = results.filter((v) => v.import_batch_id === filters.batchId);
+  }
   if (filters.voterName) {
     const q = filters.voterName.toLowerCase();
     results = results.filter(

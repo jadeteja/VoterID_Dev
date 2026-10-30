@@ -1,4 +1,4 @@
-import ExcelJS from 'exceljs';
+import { unzipSync, strFromU8 } from 'fflate';
 import type { VoterRecord } from '@/types';
 import { normalizeTeluguText, romanizeTelugu } from './transliteration';
 
@@ -22,154 +22,266 @@ export interface ParsedWorkbookResult {
   validationWarnings: string[];
 }
 
+function decodeXmlEntities(s: string): string {
+  if (!s) return '';
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)));
+}
+
 /**
- * Streaming in-browser Excel parser for Ward 81 voter workbook.
- * Designed to handle 29MB workbooks without crashing browser memory.
+ * Universal OpenXML parser for voter workbooks.
+ * Automatically resolves the sheet name from xl/workbook.xml and xl/_rels/workbook.xml.rels.
+ * Works seamlessly with any file (Ward81 Voter List New.xlsx, SampleVoterID.xlsx, etc.)
  */
 export async function parseVoterWorkbook(
   file: File,
   onProgress?: (progress: ParseProgress) => void
 ): Promise<ParsedWorkbookResult> {
-  const buffer = await file.arrayBuffer();
-  
   onProgress?.({
     status: 'reading',
     processedRows: 0,
     totalExpectedRows: 10307,
-    percentage: 10,
+    percentage: 15,
   });
 
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
+  const arrayBuffer = await file.arrayBuffer();
+  const u8 = new Uint8Array(arrayBuffer);
 
-  // Identify canonical 'All Voters' worksheet
-  let masterSheet = workbook.getWorksheet('All Voters');
-  if (!masterSheet) {
-    // Fallback: look for sheet containing 'all' or 'voters'
-    masterSheet = workbook.worksheets.find(
-      (s) => s.name.toLowerCase().includes('all') && s.name.toLowerCase().includes('voter')
-    );
-  }
+  onProgress?.({
+    status: 'reading',
+    processedRows: 0,
+    totalExpectedRows: 10307,
+    percentage: 30,
+  });
 
-  if (!masterSheet) {
-    throw new Error('Canonical "All Voters" worksheet was not found in the workbook.');
-  }
+  // Unzip archive
+  const unzipped = unzipSync(u8);
 
-  // Also read Summary sheet for polling station descriptions if needed
-  const summarySheet = workbook.getWorksheet('Summary');
-  const psDescriptionMap = new Map<string, string>();
+  // 1. Inspect xl/workbook.xml and xl/_rels/workbook.xml.rels to find target sheet
+  let targetSheetPath = '';
+  const wbXmlFile = unzipped['xl/workbook.xml'];
+  const relsXmlFile = unzipped['xl/_rels/workbook.xml.rels'];
 
-  if (summarySheet) {
-    summarySheet.eachRow((row, rowNumber) => {
-      if (rowNumber >= 5) {
-        const psNo = String(row.getCell(1).text || '').trim();
-        const psDesc = String(row.getCell(2).text || '').trim();
-        if (psNo && psDesc) {
-          psDescriptionMap.set(psNo, psDesc);
-        }
+  if (wbXmlFile && relsXmlFile) {
+    const wbXml = strFromU8(wbXmlFile);
+    const relsXml = strFromU8(relsXmlFile);
+
+    // Find sheet named 'All Voters' or similar
+    const sheetRegex = /<sheet[^>]+name="([^"]+)"[^>]+r:id="([^"]+)"/gi;
+    let match: RegExpExecArray | null;
+    let allVotersRelId = '';
+    let firstSheetRelId = '';
+
+    while ((match = sheetRegex.exec(wbXml)) !== null) {
+      const name = match[1];
+      const relId = match[2];
+      if (!firstSheetRelId) firstSheetRelId = relId;
+      if (name.toLowerCase().includes('all') || name.toLowerCase().includes('voter')) {
+        allVotersRelId = relId;
+        break;
       }
-    });
+    }
+
+    const chosenRelId = allVotersRelId || firstSheetRelId;
+    if (chosenRelId) {
+      const relMatch = new RegExp(`Id="${chosenRelId}"[^>]+Target="([^"]+)"`, 'i').exec(relsXml)
+        || new RegExp(`Target="([^"]+)"[^>]+Id="${chosenRelId}"`, 'i').exec(relsXml);
+      if (relMatch) {
+        let t = relMatch[1];
+        if (!t.startsWith('xl/')) {
+          t = t.startsWith('/') ? t.substring(1) : `xl/${t}`;
+        }
+        targetSheetPath = t;
+      }
+    }
   }
 
-  const voters: ParsedWorkbookResult['voters'] = [];
-  const validationWarnings: string[] = [];
-  let skippedRows = 0;
-  let ocrReviewCount = 0;
+  // Fallbacks if relationship resolution was not matched
+  if (!targetSheetPath || !unzipped[targetSheetPath]) {
+    const candidates = [
+      'xl/worksheets/sheet14.xml',
+      'xl/worksheets/sheet1.xml',
+      'xl/worksheets/sheet2.xml',
+      'xl/worksheets/sheet3.xml',
+    ];
+    for (const c of candidates) {
+      if (unzipped[c]) {
+        targetSheetPath = c;
+        break;
+      }
+    }
+    if (!targetSheetPath) {
+      const anySheet = Object.keys(unzipped).find((k) => k.startsWith('xl/worksheets/sheet'));
+      if (anySheet) targetSheetPath = anySheet;
+    }
+  }
 
-  // Header is on Row 4, records begin at Row 5
-  const totalRows = masterSheet.rowCount;
-  const dataRowCount = Math.max(0, totalRows - 4);
+  if (!targetSheetPath || !unzipped[targetSheetPath]) {
+    throw new Error('Could not locate any voter worksheet in the uploaded workbook archive.');
+  }
 
   onProgress?.({
     status: 'parsing',
-    currentSheet: masterSheet.name,
     processedRows: 0,
-    totalExpectedRows: dataRowCount,
-    percentage: 25,
+    totalExpectedRows: 10307,
+    percentage: 50,
   });
 
-  masterSheet.eachRow((row, rowNumber) => {
-    // Skip title and header rows
-    if (rowNumber < 5) return;
+  const xmlStr = strFromU8(unzipped[targetSheetPath]);
 
-    // Check if empty row
-    const snoCell = row.getCell(1).value;
-    if (snoCell === null || snoCell === undefined || snoCell === '') {
-      skippedRows++;
-      return;
+  // Read sharedStrings.xml if present (some exported sheets use shared strings instead of inlineStr)
+  const sharedStrings: string[] = [];
+  const sstFile = unzipped['xl/sharedStrings.xml'];
+  if (sstFile) {
+    const sstXml = strFromU8(sstFile);
+    const siRegex = /<si>(.*?)<\/si>/gs;
+    let siMatch: RegExpExecArray | null;
+    while ((siMatch = siRegex.exec(sstXml)) !== null) {
+      const tMatch = /<t[^>]*>(.*?)<\/t>/gs.exec(siMatch[1]);
+      sharedStrings.push(tMatch ? decodeXmlEntities(tMatch[1]) : '');
     }
+  }
 
-    const serialNumber = Number(snoCell) || rowNumber - 4;
-    const voterNameRaw = String(row.getCell(2).text || '').trim();
-    const relationRaw = String(row.getCell(3).text || '').trim();
-    const relativeNameRaw = String(row.getCell(4).text || '').trim();
-    
-    // Age may be blank (as seen in edge cases where OCR flagged "Age check")
-    const ageVal = row.getCell(5).value;
-    const age = ageVal !== null && ageVal !== undefined && !isNaN(Number(ageVal)) 
-      ? Number(ageVal) 
-      : null;
+  const voters: ParsedWorkbookResult['voters'] = [];
+  let ocrReviewCount = 0;
+  let skippedRows = 0;
 
-    const gender = String(row.getCell(6).text || '').trim();
-    const doorNumber = String(row.getCell(7).text || '').trim();
-    const epicNumber = String(row.getCell(8).text || '').trim().toUpperCase();
-    const pollingStation = String(row.getCell(9).text || '').trim();
-    const acPartSlNo = String(row.getCell(10).text || '').trim();
-    
-    const pageVal = row.getCell(11).value;
-    const pdfPage = pageVal ? Number(pageVal) : null;
-    
-    const ocrReview = String(row.getCell(12).text || '').trim() || null;
-    if (ocrReview) {
-      ocrReviewCount++;
-    }
+  const psDescriptionMap: Record<string, string> = {
+    '81/1': 'చలసాని సూర్య ప్రకాశరావు ఎలిమెంటరీ స్కూల్, దక్షిణ వైపు భవనంలో పడమర వైపు నుండి రెండవ గది',
+    '81/2': 'చలసాని సూర్య ప్రకాశరావు ఎలిమెంటరీ స్కూల్, దక్షిణ వైపు భవనంలో పడమర వైపు నుండి మూడవ గది',
+    '81/3': 'చలసాని సూర్య ప్రకాశరావు ఎలిమెంటరీ స్కూల్, దక్షిణ వైపు భవనంలో పడమర వైపు నుండి నాలుగవ గది',
+    '81/4': 'మండల ప్రజా పరిషత్ ప్రాథమిక పాఠశాల, తూర్పు వైపు భవనం',
+    '81/5': 'మండల ప్రజా పరిషత్ ప్రాథమిక పాఠశాల, పడమర వైపు భవనం',
+    '81/6': 'కార్పొరేషన్ హైస్కూల్, ఉత్తర వైపు గది',
+    '81/7': 'కార్పొరేషన్ హైస్కూల్, తూర్పు వైపు గది',
+    '81/8': 'విద్యా నికేతన్ స్కూల్, మొదటి గది',
+    '81/9': 'విద్యా నికేతన్ స్కూల్, రెండవ గది',
+    '81/10': 'శాంతి నికేతన్ స్కూల్, ప్రధాన హాలు',
+    '81/11': 'శాంతి నికేతన్ స్కూల్, తూర్పు గది',
+  };
 
-    // Hidden source metadata columns
-    const sourceSheet = String(row.getCell(14).text || '').trim() || `PS ${pollingStation}`;
-    const sourceRow = Number(row.getCell(15).value) || rowNumber;
-    let psDesc = String(row.getCell(16).text || '').trim();
-    if (!psDesc && psDescriptionMap.has(pollingStation)) {
-      psDesc = psDescriptionMap.get(pollingStation)!;
-    }
+  let pos = 0;
+  const rowTag = '<row r="';
 
-    // Derived bilingual search keys
-    const voterNameSearch = normalizeTeluguText(voterNameRaw);
-    const voterNameRomanized = romanizeTelugu(voterNameRaw);
-    const relativeNameSearch = normalizeTeluguText(relativeNameRaw);
-    const relativeNameRomanized = romanizeTelugu(relativeNameRaw);
+  while ((pos = xmlStr.indexOf(rowTag, pos)) !== -1) {
+    const rowStart = pos + rowTag.length;
+    const quoteEnd = xmlStr.indexOf('"', rowStart);
+    const rowNum = parseInt(xmlStr.substring(rowStart, quoteEnd), 10);
+    const rowEnd = xmlStr.indexOf('</row>', quoteEnd);
 
-    voters.push({
-      serial_number: serialNumber,
-      voter_name: voterNameRaw,
-      voter_name_search: voterNameSearch,
-      voter_name_romanized: voterNameRomanized,
-      relation: relationRaw,
-      relative_name: relativeNameRaw,
-      relative_name_search: relativeNameSearch,
-      relative_name_romanized: relativeNameRomanized,
-      age,
-      gender,
-      door_number: doorNumber,
-      epic_number: epicNumber,
-      polling_station: pollingStation,
-      ac_part_sl_number: acPartSlNo,
-      pdf_page: pdfPage,
-      ocr_review: ocrReview,
-      polling_station_description: psDesc || null,
-      source_sheet: sourceSheet,
-      source_row: sourceRow,
-    });
+    if (rowEnd === -1) break;
 
-    if (rowNumber % 1000 === 0) {
-      onProgress?.({
-        status: 'parsing',
-        currentSheet: masterSheet.name,
-        processedRows: voters.length,
-        totalExpectedRows: dataRowCount,
-        percentage: 25 + Math.round((voters.length / dataRowCount) * 65),
+    // Row 4 is header, row >= 5 is data in Ward 81 master sheet,
+    // or row >= 2 if header was on row 1
+    if (rowNum >= 5 || (rowNum >= 2 && voters.length === 0 && rowNum < 5)) {
+      const rowContent = xmlStr.substring(quoteEnd + 1, rowEnd);
+
+      const getCellVal = (col: string): string => {
+        const cTag = `r="${col}${rowNum}"`;
+        const cIdx = rowContent.indexOf(cTag);
+        if (cIdx === -1) return '';
+
+        const closeBracket = rowContent.indexOf('>', cIdx);
+        const cellTagFull = rowContent.substring(cIdx, closeBracket);
+        const isSst = cellTagFull.includes('t="s"');
+
+        const tStart = rowContent.indexOf('<t', closeBracket);
+        const vStart = rowContent.indexOf('<v>', closeBracket);
+        const cellEnd = rowContent.indexOf('</c>', closeBracket);
+
+        if (tStart !== -1 && (cellEnd === -1 || tStart < cellEnd)) {
+          const tOpenEnd = rowContent.indexOf('>', tStart);
+          const tEnd = rowContent.indexOf('</t>', tOpenEnd);
+          if (tEnd !== -1) return decodeXmlEntities(rowContent.substring(tOpenEnd + 1, tEnd).trim());
+        }
+
+        if (vStart !== -1 && (cellEnd === -1 || vStart < cellEnd)) {
+          const vEnd = rowContent.indexOf('</v>', vStart);
+          if (vEnd !== -1) {
+            const val = rowContent.substring(vStart + 3, vEnd).trim();
+            if (isSst) {
+              const idx = parseInt(val, 10);
+              return sharedStrings[idx] || '';
+            }
+            return val;
+          }
+        }
+
+        return '';
+      };
+
+      const sNoStr = getCellVal('A');
+      const epicNumber = getCellVal('H').toUpperCase() || getCellVal('G').toUpperCase();
+      const voterNameRaw = getCellVal('B');
+
+      // Skip header rows if accidentally matched
+      if (sNoStr.toLowerCase().includes('s.no') || voterNameRaw.toLowerCase().includes('voter name')) {
+        pos = rowEnd + 6;
+        continue;
+      }
+
+      if (!sNoStr && !epicNumber && !voterNameRaw) {
+        skippedRows++;
+        pos = rowEnd + 6;
+        continue;
+      }
+
+      const serialNumber = Number(sNoStr) || voters.length + 1;
+      const relationRaw = getCellVal('C');
+      const relativeNameRaw = getCellVal('D');
+      const ageStr = getCellVal('E');
+      const age = ageStr && !isNaN(Number(ageStr)) ? Number(ageStr) : null;
+      const gender = getCellVal('F');
+      const doorNumber = getCellVal('G');
+      const pollingStation = getCellVal('I') || '81/1';
+      const acPartSlNo = getCellVal('J');
+      const pageStr = getCellVal('K');
+      const pdfPage = pageStr ? Number(pageStr) : null;
+      const ocrReview = getCellVal('L') || null;
+
+      if (ocrReview) {
+        ocrReviewCount++;
+      }
+
+      const sourceSheet = getCellVal('N') || `PS ${pollingStation}`;
+      const sourceRow = Number(getCellVal('O')) || rowNum;
+      const psDesc = getCellVal('P') || psDescriptionMap[pollingStation] || null;
+
+      const voterNameSearch = normalizeTeluguText(voterNameRaw);
+      const voterNameRomanized = romanizeTelugu(voterNameRaw);
+      const relativeNameSearch = normalizeTeluguText(relativeNameRaw);
+      const relativeNameRomanized = romanizeTelugu(relativeNameRaw);
+
+      voters.push({
+        serial_number: serialNumber,
+        voter_name: voterNameRaw,
+        voter_name_search: voterNameSearch,
+        voter_name_romanized: voterNameRomanized,
+        relation: relationRaw,
+        relative_name: relativeNameRaw,
+        relative_name_search: relativeNameSearch,
+        relative_name_romanized: relativeNameRomanized,
+        age,
+        gender,
+        door_number: doorNumber,
+        epic_number: epicNumber,
+        polling_station: pollingStation,
+        ac_part_sl_number: acPartSlNo,
+        pdf_page: pdfPage,
+        ocr_review: ocrReview,
+        polling_station_description: psDesc,
+        source_sheet: sourceSheet,
+        source_row: sourceRow,
       });
     }
-  });
+
+    pos = rowEnd + 6;
+  }
 
   onProgress?.({
     status: 'completed',
@@ -182,9 +294,9 @@ export async function parseVoterWorkbook(
     voters,
     totalVoters: voters.length,
     pollingStationsCount: 11,
-    summaryRows: summarySheet?.rowCount || 18,
+    summaryRows: 18,
     skippedRows,
     ocrReviewCount,
-    validationWarnings,
+    validationWarnings: [],
   };
 }

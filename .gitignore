@@ -18,3 +18,4 @@ lerna-debug.log*
 *.csv
 *Ward81*
 ward81_temp*
+!public/data/voters.json

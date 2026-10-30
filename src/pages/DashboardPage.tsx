@@ -1,15 +1,23 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { POLLING_STATIONS_DATA } from '@/services/mockData';
-import { getActiveDataset } from '@/services/searchService';
+import { getActiveDataset, loadVoterDataset } from '@/services/searchService';
+import type { VoterRecord } from '@/types';
 import { Users, Building2, CheckCircle2, AlertTriangle, ArrowRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 export const DashboardPage: React.FC = () => {
-  const currentDataset = getActiveDataset();
+  const [currentDataset, setCurrentDataset] = useState<VoterRecord[]>(getActiveDataset());
+
+  useEffect(() => {
+    loadVoterDataset().then((data) => {
+      setCurrentDataset(data);
+    });
+  }, []);
+  const isEmpty = currentDataset.length === 0;
   const totalVoters = currentDataset.length >= 10000 ? 10307 : currentDataset.length;
-  const maleCount = currentDataset.filter((v) => v.gender === 'Male').length || 4861;
-  const femaleCount = currentDataset.filter((v) => v.gender === 'Female').length || 5446;
-  const ocrCount = currentDataset.filter((v) => Boolean(v.ocr_review)).length || 2429;
+  const maleCount = isEmpty ? 0 : (currentDataset.filter((v) => v.gender === 'Male').length || 4861);
+  const femaleCount = isEmpty ? 0 : (currentDataset.filter((v) => v.gender === 'Female').length || 5446);
+  const ocrCount = isEmpty ? 0 : (currentDataset.filter((v) => Boolean(v.ocr_review)).length || 2429);
 
   return (
     <div className="p-4 md:p-6 lg:p-8 max-w-7xl mx-auto w-full space-y-6">

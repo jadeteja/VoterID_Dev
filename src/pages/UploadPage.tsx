@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, RefreshCw, ArrowRight } from 'lucide-react';
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, RefreshCw, ArrowRight, Database } from 'lucide-react';
 import { parseVoterWorkbook, type ParseProgress, type ParsedWorkbookResult } from '@/lib/excel-parser';
-import { saveActiveDataset } from '@/services/searchService';
+import { saveActiveDataset, uploadDatasetToSupabase } from '@/services/searchService';
+import { isSupabaseConfigured } from '@/lib/supabase';
 import type { VoterRecord } from '@/types';
 import { useNavigate } from 'react-router-dom';
 
@@ -10,6 +11,8 @@ export const UploadPage: React.FC = () => {
   const [progress, setProgress] = useState<ParseProgress | null>(null);
   const [parsedResult, setParsedResult] = useState<ParsedWorkbookResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isDbUploading, setIsDbUploading] = useState(false);
+  const [dbProgress, setDbProgress] = useState<{ current: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isCommitted, setIsCommitted] = useState(false);
 
@@ -47,10 +50,32 @@ export const UploadPage: React.FC = () => {
     }
   };
 
-  const handleCommitDataset = () => {
-    if (!parsedResult) return;
+  const handleCommitDataset = async () => {
+    if (!parsedResult || !file) return;
 
-    // Convert parsed records to VoterRecord format
+    if (isSupabaseConfigured) {
+      setIsDbUploading(true);
+      setError(null);
+      try {
+        await uploadDatasetToSupabase(
+          file.name,
+          file.size,
+          parsedResult.voters,
+          (inserted, total) => {
+            setDbProgress({ current: inserted, total });
+          }
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to upload records to database';
+        setError(msg);
+        setIsDbUploading(false);
+        return;
+      } finally {
+        setIsDbUploading(false);
+      }
+    }
+
+    // Convert parsed records to VoterRecord format for local instant search
     const fullVoterRecords: VoterRecord[] = parsedResult.voters.map((v, idx) => ({
       ...v,
       id: `voter-${idx + 1}`,
@@ -60,7 +85,7 @@ export const UploadPage: React.FC = () => {
       updated_at: new Date().toISOString(),
     }));
 
-    saveActiveDataset(fullVoterRecords);
+    saveActiveDataset(fullVoterRecords, file.name);
     setIsCommitted(true);
   };
 
@@ -192,13 +217,33 @@ export const UploadPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="pt-2 flex justify-end">
+              <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div className="text-xs text-slate-500 flex items-center space-x-1.5">
+                  <Database className="w-4 h-4 text-blue-600" />
+                  <span>
+                    {isSupabaseConfigured
+                      ? 'Target: PostgreSQL Database (Multi-sheet persistent storage)'
+                      : 'Target: Browser Session Cache (Connect Supabase to persist in cloud DB)'}
+                  </span>
+                </div>
                 <button
                   onClick={handleCommitDataset}
-                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg text-sm shadow-sm transition flex items-center space-x-2"
+                  disabled={isDbUploading}
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold rounded-lg text-sm shadow-sm transition flex items-center space-x-2"
                 >
-                  <CheckCircle className="w-4 h-4" />
-                  <span>Activate Dataset for Search (యాక్టివేట్ చేయండి)</span>
+                  {isDbUploading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>
+                        Saving to DB ({dbProgress ? `${dbProgress.current} / ${dbProgress.total}` : 'Uploading...'})
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle className="w-4 h-4" />
+                      <span>Save & Activate Dataset / యాక్టివేట్ చేయండి</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -212,8 +257,8 @@ export const UploadPage: React.FC = () => {
           </div>
           <h2 className="text-xl font-bold text-slate-900">Dataset Activated Successfully!</h2>
           <p className="text-sm text-slate-600 max-w-md mx-auto font-telugu">
-            వార్డు 81 కి సంబంధించిన {parsedResult?.totalVoters.toLocaleString()} ఓటర్ల రికార్డులు సిద్ధంగా ఉన్నాయి.
-            ఇకపై మీరు ఎప్పుడైనా శోధించవచ్చు.
+            {file?.name}: {parsedResult?.totalVoters.toLocaleString()} ఓటర్ల రికార్డులు సిద్ధంగా ఉన్నాయి.
+            డేటాబేస్ మరియు శోధనలో విజయవంతంగా యాక్టివేట్ చేయబడ్డాయి.
           </p>
 
           <div className="pt-4 flex justify-center">

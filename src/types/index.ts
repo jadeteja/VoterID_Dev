@@ -55,6 +55,7 @@ export interface VoterRecord {
 
 export interface SearchFilters {
   query?: string;
+  batchId?: string;
   voterName?: string;
   relativeName?: string;
   epicNumber?: string;
